@@ -1,0 +1,10 @@
+services:
+  bot:
+    build:
+      context: ./bot
+    container_name: comsec-bot
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Seoul
+    restart: unless-stopped
