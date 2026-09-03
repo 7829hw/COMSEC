@@ -16,9 +16,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-NVIDIA_API_KEY = os.environ["NVIDIA_API_KEY"]
-NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NVIDIA_MODEL = "google/gemma-4-31b-it"
+LLM_API_KEY = os.environ["LLM_API_KEY"]
+LLM_BASE_URL = os.environ["LLM_BASE_URL"].rstrip("/")
+LLM_API_URL = f"{LLM_BASE_URL}/chat/completions"
+LLM_MODEL = os.environ["LLM_MODEL"]
+LLM_EXTRA_BODY = json.loads(os.getenv("LLM_EXTRA_BODY") or "{}")
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 CHANNEL_ID = int(os.environ["CHANNEL_ID"])
 SEND_HOUR = int(os.getenv("SEND_HOUR", "9"))
@@ -59,13 +61,13 @@ ATTEMPT_TIMEOUT = 300.0
 async def _call_llm_once() -> dict:
     async with httpx.AsyncClient(timeout=ATTEMPT_TIMEOUT) as client:
         resp = await client.post(
-            NVIDIA_API_URL,
+            LLM_API_URL,
             headers={
-                "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                "Authorization": f"Bearer {LLM_API_KEY}",
                 "Accept": "application/json",
             },
             json={
-                "model": NVIDIA_MODEL,
+                "model": LLM_MODEL,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": "오늘의 암구호를 생성하라."},
@@ -74,7 +76,7 @@ async def _call_llm_once() -> dict:
                 "top_p": 0.95,
                 "max_tokens": 1024,
                 "stream": False,
-                "chat_template_kwargs": {"enable_thinking": True},
+                **LLM_EXTRA_BODY,
             },
         )
         resp.raise_for_status()
