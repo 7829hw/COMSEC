@@ -24,6 +24,7 @@ LLM_EXTRA_BODY = json.loads(os.getenv("LLM_EXTRA_BODY") or "{}")
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 CHANNEL_ID = int(os.environ["CHANNEL_ID"])
 SEND_HOUR = int(os.getenv("SEND_HOUR", "9"))
+HISTORY_FILE = os.getenv("HISTORY_FILE", "data/history.json")
 
 SYSTEM_PROMPT = """너는 군사 암구호 생성기다.
 반드시 아래 JSON 형식만 출력하라. 설명, 마크다운, 추가 텍스트 없이 JSON만 출력하라.
@@ -35,6 +36,8 @@ SYSTEM_PROMPT = """너는 군사 암구호 생성기다.
 - 문어와 답어는 각각 실제로 존재하는 완전한 한국어 명사 한 단어
 - 두 단어는 의미적 연관성이 없어야 함 (연상, 유추, 범주 공유 불가)
 - 매번 새롭고 다양한 단어 조합 생성
+- 사용자 메시지에 "사용 금지 단어" 목록이 주어지면 문어와 답어 모두 그 목록에 없는 단어여야 함
+- 아래 예시는 형식 참고용일 뿐이므로, 금지 목록에 있는 예시 단어는 사용 불가
 - JSON 외 어떤 텍스트도 출력 금지
 
 올바른 예시:
@@ -58,7 +61,50 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 ATTEMPT_TIMEOUT = 300.0
 
 
-async def _call_llm_once() -> dict:
+def load_history() -> list:
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    try:
+        with open(HISTORY_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("이력 파일을 읽을 수 없어 빈 목록으로 시작합니다 (%s): %s", HISTORY_FILE, e)
+        return []
+
+
+def save_history(history: list) -> None:
+    directory = os.path.dirname(HISTORY_FILE)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{HISTORY_FILE}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, HISTORY_FILE)
+
+
+def used_words(history: list) -> list:
+    words = []
+    for entry in history:
+        for key in ("문어", "답어"):
+            word = str(entry.get(key, "")).strip()
+            if word and word not in words:
+                words.append(word)
+    return words
+
+
+HISTORY = load_history()
+logger.info("암구호 이력 %d건 로드 (%s)", len(HISTORY), HISTORY_FILE)
+
+
+async def _call_llm_once(banned: list) -> dict:
+    user_content = "오늘의 암구호를 생성하라."
+    if banned:
+        user_content += (
+            "\n\n아래 단어들은 이전에 이미 사용된 단어다. "
+            "문어와 답어 모두 이 목록에 없는 완전히 새로운 단어로 생성하라.\n"
+            "사용 금지 단어: " + ", ".join(banned)
+        )
+
     async with httpx.AsyncClient(timeout=ATTEMPT_TIMEOUT) as client:
         resp = await client.post(
             LLM_API_URL,
@@ -70,11 +116,11 @@ async def _call_llm_once() -> dict:
                 "model": LLM_MODEL,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": "오늘의 암구호를 생성하라."},
+                    {"role": "user", "content": user_content},
                 ],
                 "temperature": 0.9,
                 "top_p": 0.95,
-                "max_tokens": 1024,
+                "max_tokens": 8192,
                 "stream": False,
                 **LLM_EXTRA_BODY,
             },
@@ -106,11 +152,30 @@ async def _call_llm_once() -> dict:
     raise ValueError(f"JSON을 찾을 수 없습니다. content={content!r}")
 
 
-async def call_llm(max_retries: int = 3) -> dict:
+async def call_llm(max_retries: int = 5) -> dict:
+    banned = used_words(HISTORY)
     last_exc: Exception = RuntimeError("알 수 없는 오류")
     for attempt in range(1, max_retries + 1):
         try:
-            return await asyncio.wait_for(_call_llm_once(), timeout=ATTEMPT_TIMEOUT)
+            result = await asyncio.wait_for(_call_llm_once(banned), timeout=ATTEMPT_TIMEOUT)
+
+            challenge = str(result.get("문어", "")).strip()
+            answer = str(result.get("답어", "")).strip()
+            if not challenge or not answer:
+                raise ValueError(f"문어/답어가 비어 있습니다: {result!r}")
+
+            duplicates = [w for w in (challenge, answer) if w in banned]
+            if duplicates:
+                raise ValueError(f"이미 사용된 단어: {', '.join(duplicates)}")
+
+            entry = {
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "문어": challenge,
+                "답어": answer,
+            }
+            HISTORY.append(entry)
+            save_history(HISTORY)
+            return entry
         except asyncio.TimeoutError:
             last_exc = RuntimeError("2분 내 응답 없음")
             logger.warning("암구호 생성 실패 (시도 %d/%d): 2분 초과", attempt, max_retries)

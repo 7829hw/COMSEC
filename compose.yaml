@@ -7,4 +7,6 @@ services:
       - .env
     environment:
       - TZ=Asia/Seoul
+    volumes:
+      - ./data:/app/data
     restart: unless-stopped
